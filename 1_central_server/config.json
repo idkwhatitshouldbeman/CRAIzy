@@ -1,0 +1,12 @@
+{
+  "host": "0.0.0.0",
+  "port": 5000,
+  "batch_size": 16,
+  "safety_games": 17,
+  "expected_bots": null,
+  "update_timeout_seconds": 300,
+  "heartbeat_interval": 10,
+  "heartbeat_timeout": 30,
+  "kaggle_endpoint": "local",
+  "model_save_path": "./models/current_model.pth"
+}
