@@ -1,0 +1,861 @@
+PROJECT CONTEXT AND ALL DECISIONS (BAKED IN - NO THINKING REQUIRED)
+You are building a complete, working Clash Royale AI system using pure reinforcement learning (PPO) with vision-based input (screenshots only, no manual feature extraction). The AI learns to play competitively with a fixed beatdown deck, deciding the best move (card + position or "wait") from grayscale screenshots alone. It surpasses human play through trial/error in real games on burner accounts. This is a short-term hobby project: focus on correctness, efficiency, and scalability. Everything is free, local where possible, and optimized for minimal storage (compressed data, no bloat).
+ALL KEY DECISIONS FROM CONVERSATION (EXHAUSTIVE LIST - USE THESE EXACTLY):
+
+Goal: Competitive bot for your deck. Learns purely via RL (no imitation, no your footage). Works with any screenshot input (image → action). Short-term: Working in 4 weeks. Success: Plays full matches, ~50% win rate after training.
+Deck (Fixed): ["knight" (3 elixir, Lv2), "valkyrie" (3, Lv3), "minions" (3, Lv1), "arrows" (3, Lv1), "fireball" (4, Lv3), "giant" (5, Lv3), "pekka" (4, Lv3), "dark_prince" (4, Lv4)]. Avg 3.6 elixir. Cycle via tracker for logging only (AI ignores).
+RL Algorithm: PPO via Stable-Baselines3 (CnnPolicy for images). Hyperparams: learning_rate=3e-4, n_steps=2048, batch_size=64, n_epochs=10, total_timesteps=2_000_000 (incremental per batch). No local training (host stressed).
+Vision-Based Learning: Input: Grayscale screenshot every 3 seconds. Resolution: 224 height x 128 width (preserve aspect ratio from fixed emulator 720x1280 portrait). Compression: OpenCV grayscale + JPEG Q=40 + base64 (~3-5KB/frame). AI sees pixels only; learns elixir/cards/units from images.
+Action Space: Flat discrete(2305). 4 slots x 576 positions (24x24 grid) = 2304 plays + 2304="wait". Encode: action_id = slot * 576 + (y * 24 + x). Decode reverse. Include "wait" to learn not playing.
+Rewards (Training Signal Only - Not for Decisions): Per step: +0.01/HP enemy damage, -0.01/HP my damage (from tower HP changes via BuildABot), +50 enemy tower destroy, -50 my tower destroy, -0.1 step penalty. End: +100 win, -100 loss, 0 draw. Calc on bot using BuildABot tower HP read (reliable; no unit detection).
+Data Collection: Real matches (3-5 min). Trajectory: List of dicts with step, time, image (base64+shape), action_id, action_details (logging), reward. ~60 frames/game (180s/3s). Batch: Collect 17 games (safety), train on first 16 (discard extra if crash). Size: ~3.8MB/batch (efficient).
+Parallelization: Dynamic bots (any number, server auto-registers/assigns IDs). Start with 1, scale to 8 Hyper-V VMs. Each VM: Windows + Android emulator (720x1280 portrait fixed) + Clash Royale (burner account) + BuildABot + bot script. VMs on 2nd computer, small/resizable windows (emulator fixed inside). Manual create/clone VMs; script starts them.
+Coordination: Bots query server before new game. Server: "allowed" if <17 total games. All pause on batch ready (finish current if mid-game), update model, resume synced. No over-batch. Heartbeats every 10s (timeout 30s for crash). Easy add/remove: Server detects new bots via heartbeat, compensates (e.g., fewer bots play more games to hit 17).
+Networking: HTTP REST (Flask on host). Bots connect to http://192.168.86.21:5000 (server listens 0.0.0.0). VMs use Hyper-V Default Switch (reachable via host IP). Firewall: Allow inbound 5000. No WebSockets. Locks for race conditions.
+UI/Dashboard: Simple HTML on /ui (localhost:5000/ui). Auto-refresh <meta http-equiv="refresh" content="10">. Show: Server status (collecting/training/ready), games X/17 (train on 16), bot list (ID, status: playing/waiting/updating/crashed, progress 0-1, games done), model version, recent events log (e.g., "Bot3 finished game"), training metrics (if from Kaggle). Clean table layout (Bootstrap optional, but plain CSS OK).
+Storage Efficiency: Compressed images only. Local buffers: Delete after upload. Models: ~50-200MB .pth, store in server/models/. No extras (no videos/snapshots beyond testing).
+Risks/Mitigations: Bans: Burner accounts, 0.5-2s random delays, imperfect mouse (BuildABot handles). Detection: Pure vision avoids errors. Crashes: Heartbeat timeout restarts bot with last model. Kaggle timeout: Queue batches locally, retry.
+Hardware: Host: i7-11700K, 32GB RAM, K4000 (inference only). VMs: 4GB RAM, 2 cores each. Emulator fixed 720x1280.
+Phases/Timeline: Week 1: Setup/single bot. Week 2: Multi-bot/UI. Week 3: Full scale. Week 4: Kaggle/tuning.
+Testing/Edge Cases: Single bot, add/remove mid-run, mid-game pause, Kaggle down (queue), crash recovery, over-batch prevention, invalid actions (log/warn).
+
+EXACT FOLDER STRUCTURE (3 FOLDERS ONLY - NO MORE/LESS):
+Root: clash-royale-rl/
+├── 1_central_server/ (Host PC only: Server + UI)
+│   ├── start_server.bat (Launches server.py)
+│   ├── server.py (Flask app)
+│   ├── state_manager.py
+│   ├── kaggle_client.py
+│   ├── ui_template.html (Dashboard)
+│   ├── models/ (.gitkeep)
+│   └── config.json (Server config)
+├── 2_bot_client/ (Copy entire folder to each VM; runs bot)
+│   ├── start_bot.bat (Launches main.py)
+│   ├── main.py (Bot loop)
+│   ├── vision_agent.py
+│   ├── game_interface.py (BuildABot wrapper)
+│   ├── card_tracker.py
+│   ├── image_utils.py
+│   ├── server_client.py
+│   ├── config.json (Per-bot, auto-generate template)
+│   └── models/ (.gitkeep)
+└── 3_kaggle_training/ (Kaggle notebook/files)
+├── train_ppo.py (Main training)
+├── model.py (CNN arch)
+├── data_loader.py
+└── start_kaggle.bat (Local test; for Kaggle: Upload as notebook)
+STEP-BY-STEP TO-DO LIST (EXECUTE SEQUENTIALLY - ASK BEFORE NEXT PHASE):
+Phase 1: Setup Dependencies & Clone (30 min)
+
+Create root folder clash-royale-rl/.
+In root: git clone https://github.com/Pbatch/ClashRoyaleBuildABot.git (for all components; copy relevant files to bots as needed).
+Create 3 subfolders exactly as above.
+In root: Create requirements.txt with EXACT deps below. Run pip install -r requirements.txt in each folder (virtualenv recommended).
+Create configs (exact JSON below).
+Manual VM setup: Create 1st Hyper-V VM (Windows, 4GB RAM, 2 cores, Default Switch). Install in VM: Python, BlueStacks 5 (emulator, fixed 720x1280 portrait), Clash Royale (burner #1), BuildABot (per their guide: emulator-5554 connect). Copy 2_bot_client/ to VM. Test emulator res fixed.
+Test Phase 1: Run start_server.bat on host. Run start_bot.bat in VM. Verify curl http://192.168.86.21:5000/status from VM works.
+
+Phase 2: Implement Central Server (1-2 hours)
+
+Build server.py (exact endpoints/pseudocode below).
+Build state_manager.py (class with methods).
+Build kaggle_client.py (local save first).
+Add /ui endpoint with ui_template.html (exact HTML below).
+Test: Mock 2 heartbeats/game_completes. Verify batch at 17, status changes.
+
+Phase 3: Implement Bot Client (2-3 hours)
+
+Build image_utils.py (compress/decompress functions).
+Build card_tracker.py (class).
+Build game_interface.py (BuildABot wrapper, exact methods).
+Build server_client.py (requests class).
+Build vision_agent.py (random predict for now).
+Build main.py (loop + play_one_game pseudocode).
+Test standalone: In VM, run start_bot.bat, play manual game, verify trajectory capture/compress/send.
+
+Phase 4: Implement Kaggle Training (1 hour)
+
+Build data_loader.py (load/preprocess).
+Build model.py (CNN exact layers).
+Build train_ppo.py (PPO init/train/save).
+Test local: Save mock batch JSON, run train_ppo.py, verify .pth output.
+
+Phase 5: Integration & Testing (1-2 days)
+
+Full single-bot test: Host server + 1 VM bot. Play 17 games, verify batch to local, train, model download/update. Check UI.
+Edge cases: Add/remove bot mid-run (server auto-register), mid-game pause (finish current), Kaggle "down" (queue), crash (heartbeat timeout restarts with last model).
+Scale: Clone VM to 2-4, test sync. Then 8. Create burners (notes below).
+Kaggle: Upload files as notebook, set API for upload/download (kaggle_client integrates).
+Optimize: Add delays/random mouse in game_interface.py. Monitor storage (delete buffers post-upload).
+
+EXACT REQUIREMENTS.TXT (ALL 3 FOLDERS USE SAME):
+textgymnasium==0.29.1
+stable-baselines3==2.2.1
+torch==2.1.0+cu118  # For Kaggle T4
+numpy==1.24.3
+flask==3.0.0
+flask-cors==4.0.0
+requests==2.31.0
+opencv-python==4.8.1
+Pillow==10.1.0
+python-dotenv==1.0.0
+# BuildABot deps: Follow their guide (adb, opencv, etc. - install in VM)
+EXACT CONFIGS:
+1_central_server/config.json:
+json{
+  "host": "0.0.0.0",
+  "port": 5000,
+  "batch_size": 16,
+  "safety_games": 17,
+  "expected_bots": null,  // Dynamic
+  "update_timeout_seconds": 300,
+  "heartbeat_interval": 10,
+  "heartbeat_timeout": 30,
+  "kaggle_endpoint": "local",  // Change to Kaggle API later
+  "model_save_path": "./models/current_model.pth"
+}
+2_bot_client/config.json (template; copy per VM, set bot_id manual or auto):
+json{
+  "bot_id": null,  // Auto-assign on first heartbeat
+  "server_url": "http://192.168.86.21:5000",
+  "deck": ["knight", "valkyrie", "minions", "arrows", "fireball", "giant", "pekka", "dark_prince"],
+  "frame_interval_seconds": 3,
+  "heartbeat_interval": 10,
+  "model_path": "./models/current_model.pth",
+  "action_space_size": 2305,
+  "grid_size": {"x": 24, "y": 24},
+  "image_size": {"height": 224, "width": 128},
+  "emulator_resolution": {"width": 720, "height": 1280},
+  "random_delay_min": 0.5,
+  "random_delay_max": 2.0
+}
+PHASE 2: CENTRAL SERVER IMPLEMENTATION (EXACT PSEUDOCODE & EDGE CASES)
+Libraries/Tactics: Flask for API (CORS enabled). Threading.Lock for all state changes (race conditions). JSON for data. Logging to console/file (level=INFO). No DB - in-memory dict + file backup for state.
+state_manager.py:
+Class ServerState:
+pythonimport json
+from threading import Lock
+from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class ServerState:
+    def __init__(self, config_path):
+        self.config = json.load(open(config_path))
+        self.lock = Lock()
+        self.reset_state()
+        self.bots = {}  # {id: {'status': str, 'games_completed': int, 'last_heartbeat': datetime, 'progress': float}}
+        self.model_version = 0
+        self.games_buffer = []  # List of game_complete dicts
+        logging.info("ServerState initialized")
+
+    def reset_state(self):
+        with self.lock:
+            self.total_games_collected = 0
+            self.status = "collecting"  # collecting | training | ready
+            self.save_state()  # Backup to file for restarts
+
+    def save_state(self):
+        state = {
+            'total_games_collected': self.total_games_collected,
+            'status': self.status,
+            'model_version': self.model_version,
+            'bots': self.bots,
+            'games_buffer_len': len(self.games_buffer)  # Don't save full buffer to save space
+        }
+        with open('state_backup.json', 'w') as f:
+            json.dump(state, f)
+        # Delete old buffer if ready (space)
+
+    def load_state(self):
+        try:
+            with open('state_backup.json', 'r') as f:
+                state = json.load(f)
+                self.total_games_collected = state['total_games_collected']
+                self.status = state['status']
+                self.model_version = state['model_version']
+                self.bots = state['bots']
+                # Rebuild buffer if needed (from log files, but skip for space - restart loses buffer)
+            logging.info("State loaded from backup")
+        except FileNotFoundError:
+            logging.warning("No backup found, starting fresh")
+
+    def register_bot(self, bot_id):
+        with self.lock:
+            if bot_id not in self.bots:
+                self.bots[bot_id] = {'status': 'idle', 'games_completed': 0, 'last_heartbeat': datetime.now(), 'progress': 0.0}
+                logging.info(f"New bot registered: {bot_id}")
+            return True
+
+    def update_heartbeat(self, bot_id, status, progress):
+        with self.lock:
+            if bot_id not in self.bots:
+                self.register_bot(bot_id)
+            self.bots[bot_id]['status'] = status
+            self.bots[bot_id]['progress'] = progress
+            self.bots[bot_id]['last_heartbeat'] = datetime.now()
+            # Check timeout
+            if (datetime.now() - self.bots[bot_id]['last_heartbeat']).seconds > self.config['heartbeat_timeout']:
+                self.bots[bot_id]['status'] = 'crashed'
+                logging.warning(f"Bot {bot_id} timed out")
+            self.save_state()
+
+    def can_bot_play(self, bot_id):
+        with self.lock:
+            self.register_bot(bot_id)  # Auto-register
+            if self.status != "collecting":
+                return False, "Server not collecting"
+            hypothetical_total = self.total_games_collected + 1
+            if hypothetical_total > self.config['safety_games']:
+                return False, "Would exceed safety limit"
+            # Reserve slot (atomic)
+            self.total_games_collected += 1
+            return True, f"OK, {self.config['safety_games'] - hypothetical_total} remaining"
+
+    def add_game_data(self, game_data):
+        with self.lock:
+            self.games_buffer.append(game_data)
+            bot_id = game_data['bot_id']
+            if bot_id in self.bots:
+                self.bots[bot_id]['games_completed'] += 1
+            self.save_state()
+            logging.info(f"Game added from bot {bot_id}, total: {len(self.games_buffer)}")
+            if len(self.games_buffer) >= self.config['batch_size']:
+                self.start_training()
+
+    def start_training(self):
+        with self.lock:
+            if self.status == "training":
+                return  # Already training
+            self.status = "training"
+            logging.info("Batch ready - starting training")
+            # Call kaggle_client.send_batch(self.games_buffer[:self.config['batch_size']])  # First 16
+            # self.games_buffer = self.games_buffer[self.config['batch_size']:]  # Keep extras if any, discard on upload
+            # Simulate wait (in real: async thread)
+            # On complete: self.model_version += 1; self.status = "ready"; self.reset_state()
+
+    def get_status(self, bot_id):
+        with self.lock:
+            self.register_bot(bot_id)
+            eta = 0 if self.status != "training" else 120  # Estimate 2 min
+            return {
+                "server_status": self.status,
+                "should_wait": self.status != "collecting",
+                "current_model_version": self.model_version,
+                "update_available": self.status == "ready",
+                "eta_seconds": eta,
+                "total_games": self.total_games_collected,
+                "bots_active": len([b for b in self.bots.values() if b['status'] != 'crashed'])
+            }
+
+    # Edge Cases Handled:
+    # - Bot add/remove: Auto-register on heartbeat, ignore crashed in counts.
+    # - Over-batch: Lock prevents >17.
+    # - Crash: Timeout marks 'crashed', others continue (compensate by allowing more plays).
+    # - Restart: Load backup, resume status (lose buffer = recollect).
+    # - Dynamic bots: No fixed count; batch fills from whoever connects.
+server.py:
+pythonfrom flask import Flask, request, jsonify, send_file, render_template_string
+from flask_cors import CORS
+from state_manager import ServerState
+from kaggle_client import send_batch_to_kaggle
+import logging
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+CORS(app)  # For VM cross-origin
+state = ServerState('config.json')  # Load config
+state.load_state()  # Restore on start
+
+logging.basicConfig(level=logging.INFO)
+
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    data = request.json
+    bot_id = data['bot_id']
+    status = data['status']
+    progress = data.get('game_progress', 0.0)
+    state.update_heartbeat(bot_id, status, progress)
+    return jsonify({"acknowledged": True, "server_status": state.get_status(bot_id)})
+
+@app.route('/can_i_play')
+def can_i_play():
+    bot_id = request.args.get('bot_id')
+    allowed, reason = state.can_bot_play(bot_id)
+    return jsonify({"allowed": allowed, "reason": reason})
+
+@app.route('/game_complete', methods=['POST'])
+def game_complete():
+    data = request.json
+    bot_id = data['bot_id']
+    state.add_game_data(data)
+    return jsonify({
+        "received": True,
+        "total_games": state.total_games_collected,
+        "games_until_batch": state.config['safety_games'] - state.total_games_collected
+    })
+
+@app.route('/status')
+def status():
+    bot_id = request.args.get('bot_id')
+    return jsonify(state.get_status(bot_id))
+
+@app.route('/download_model')
+def download_model():
+    model_path = state.config['model_save_path']
+    if os.path.exists(model_path):
+        return send_file(model_path, as_attachment=False)
+    else:
+        return "Model not ready", 404
+
+@app.route('/ui')
+def ui():
+    # Render dashboard with state
+    bots_list = "\n".join([f"<tr><td>{id}</td><td>{b['status']}</td><td>{b['progress']:.2f}</td><td>{b['games_completed']}</td></tr>" for id, b in state.bots.items()])
+    recent_events = "Log: Bot1 connected, Game from Bot3 added..."  # From log file parse, or in-memory list
+    html = render_template_string(ui_template, bots=bots_list, status=state.status, games=state.total_games_collected, version=state.model_version, events=recent_events)
+    return html
+
+# Exact HTML for ui_template (clean table, CSS for mobile/resize)
+ui_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clash Royale AI Dashboard</title>
+    <meta http-equiv="refresh" content="10">
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .status { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Clash Royale AI Dashboard</h1>
+    <p>Server Status: <span class="status">{{ status }}</span></p>
+    <p>Games Collected: {{ games }}/17 (Train on 16)</p>
+    <p>Model Version: {{ version }}</p>
+    <h2>Bots Status</h2>
+    <table>
+        <tr><th>Bot ID</th><th>Status</th><th>Progress</th><th>Games Done</th></tr>
+        {{ bots }}
+    </table>
+    <h2>Recent Events</h2>
+    <pre>{{ events }}</pre>
+</body>
+</html>
+"""
+
+if __name__ == '__main__':
+    logging.info("Starting server on 192.168.86.21:5000")
+    app.run(host=state.config['host'], port=state.config['port'], debug=False)
+kaggle_client.py:
+pythonimport json
+import requests
+import logging
+from datetime import datetime
+
+def send_batch_to_kaggle(games_batch, config):
+    # Phase 4 integration: Save local first
+    batch_file = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(batch_file, 'w') as f:
+        json.dump(games_batch, f)  # Compressed already in data
+    logging.info(f"Batch saved locally: {batch_file} (size: {os.path.getsize(batch_file)/1024:.1f}KB)")
+    
+    # TODO: Kaggle API (upload dataset, trigger notebook)
+    # kaggle datasets create -p {batch_file} --dir-mode zip  # Compress for space
+    # Then run notebook via API or manual
+    # Download model: kaggle datasets download -d your_model -p models/
+    
+    # Simulate: Call train_ppo.py locally for test
+    from train_ppo import train_on_batch  # Import from 3_kaggle_training
+    new_model_path = train_on_batch(batch_file)  # Returns .pth path
+    
+    # Delete batch after (space)
+    os.remove(batch_file)
+    
+    return new_model_path  # For state update
+
+# Edge: If Kaggle down, queue to 'pending_batches/' dir, retry every 5 min thread.
+start_server.bat:
+batch@echo off
+cd /d "%~dp0"
+call activate venv  # If virtualenv
+python server.py
+pause
+EDGE CASES FOR SERVER (ALL HANDLED):
+
+New bot connects: Register on heartbeat, assign next ID (e.g., len(bots)+1).
+Bot remove/crash: Mark 'crashed' on timeout, exclude from counts, others play more to hit 17.
+Mid-batch add: OK, buffer grows.
+Server restart: Load backup, resume (lose buffer = log "Recollecting batch").
+Batch full mid-game: Bots finish current (progress >0.5? Wait 60s max), then pause.
+Kaggle fail: Log error, status="collecting", queue batch to file, retry thread every 300s.
+Storage: Check disk >1GB free before buffer; compress JSON with gzip if >2MB.
+
+PHASE 3: BOT CLIENT IMPLEMENTATION (EXACT PSEUDOCODE & EDGE CASES)
+Libraries/Tactics: Requests for API. OpenCV for images. Logging. Thread for heartbeat. Random.uniform for delays. No storage beyond model (~200MB) and temp trajectory (delete post-send).
+image_utils.py:
+pythonimport cv2
+import base64
+import numpy as np
+import logging
+
+def compress_screenshot(screenshot_bgr):
+    # Input: np.array BGR from BuildABot (720x1280)
+    gray = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)  # Grayscale
+    height, width = 224, 128  # Fixed, aspect preserved (720/1280 ~0.5625, 224*0.5625~126, round to 128)
+    resized = cv2.resize(gray, (width, height))
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
+    _, buffer = cv2.imencode('.jpg', resized, encode_param)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
+    return {"data": img_base64, "shape": [height, width]}
+
+def decompress_image(compressed_dict):
+    data = compressed_dict['data']
+    shape = compressed_dict['shape']
+    buffer = base64.b64decode(data)
+    nparr = np.frombuffer(buffer, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+    return img  # For predict
+card_tracker.py:
+pythonclass CardTracker:
+    def __init__(self, deck):
+        self.deck = deck
+        self.hand = deck[:4].copy()  # Current 4 cards
+        self.next_index = 4  # Cycle from deck[4:]
+
+    def card_played(self, slot):
+        if slot is None:
+            return None
+        played = self.hand[slot]
+        self.hand[slot] = self.deck[self.next_index % len(self.deck)]
+        self.next_index += 1
+        return played  # Logging only
+game_interface.py:
+python# Wrapper for ClashRoyaleBuildABot - assume their API/classes imported
+from ClashRoyaleBuildABot import StateReader, ActionExecutor  # Per their guide
+import random
+import time
+import logging
+
+class GameInterface:
+    def __init__(self):
+        self.reader = StateReader(device='emulator-5554')  # Per BuildABot
+        self.executor = ActionExecutor(device='emulator-5554')
+        self.prev_tower_hp = {'my_total': 6400, 'enemy_total': 6400, 'my_towers_down': 0, 'enemy_towers_down': 0}  # King+2 towers
+
+    def capture_screenshot(self):
+        return self.reader.get_screenshot()  # np.array BGR, fixed 720x1280
+
+    def play_card(self, slot, x, y):
+        if slot is None:
+            return  # Wait
+        # BuildABot execute: Drag card slot to grid pos (map 24x24 to screen coords)
+        screen_x = int((x / 24.0) * 720)  # Scale to emulator width
+        screen_y = int((y / 24.0) * 1280)  # Height
+        self.executor.play_card(slot, screen_x, screen_y)
+        time.sleep(random.uniform(0.5, 2.0))  # Human-like delay
+        # Imperfect mouse: Add random offset ±5px (BuildABot supports)
+
+    def get_tower_hp(self):
+        # BuildABot reliable read: Return {'my_total': int, 'enemy_total': int, 'my_towers_down': int, 'enemy_towers_down': int}
+        return self.reader.get_tower_health()
+
+    def is_game_active(self):
+        return self.reader.is_in_battle()
+
+    def get_game_outcome(self):
+        # Post-game: 'win'/'loss'/'draw' from reader
+        return self.reader.get_battle_result()
+
+    def get_game_time(self):
+        return self.reader.get_battle_time()  # Seconds elapsed
+
+    def calculate_reward(self):
+        current = self.get_tower_hp()
+        reward = 0.0
+        enemy_dmg = self.prev_tower_hp['enemy_total'] - current['enemy_total']
+        reward += enemy_dmg * 0.01
+        my_dmg = self.prev_tower_hp['my_total'] - current['my_total']
+        reward -= my_dmg * 0.01
+        if current['enemy_towers_down'] > self.prev_tower_hp['enemy_towers_down']:
+            reward += 50
+        if current['my_towers_down'] > self.prev_tower_hp['my_towers_down']:
+            reward -= 50
+        reward -= 0.1  # Step penalty
+        self.prev_tower_hp = current
+        return reward
+
+# Edge: If BuildABot fail (e.g., emulator disconnect), log, retry 3x, then 'crashed' status to server.
+server_client.py:
+pythonimport requests
+import time
+import logging
+from datetime import datetime
+
+class ServerClient:
+    def __init__(self, server_url):
+        self.url = server_url.rstrip('/')
+        self.session = requests.Session()
+        self.bot_id = None  # Assigned by server
+
+    def register(self):
+        # On first call, send dummy heartbeat to register
+        resp = self.session.post(f"{self.url}/heartbeat", json={"bot_id": "new", "status": "idle", "timestamp": str(datetime.now())})
+        if resp.status_code == 200:
+            self.bot_id = resp.json().get('assigned_id', 1)  # Server assigns
+            logging.info(f"Registered as bot {self.bot_id}")
+            return self.bot_id
+        raise ConnectionError("Registration failed")
+
+    def send_heartbeat(self, status, progress):
+        if self.bot_id is None:
+            self.register()
+        payload = {
+            "bot_id": self.bot_id,
+            "timestamp": str(datetime.now()),
+            "status": status,
+            "game_progress": progress
+        }
+        try:
+            resp = self.session.post(f"{self.url}/heartbeat", json=payload, timeout=5)
+            if resp.status_code == 200:
+                return resp.json()
+        except requests.RequestException as e:
+            logging.error(f"Heartbeat failed: {e}")
+        return None
+
+    def can_i_play(self):
+        if self.bot_id is None:
+            self.register()
+        resp = self.session.get(f"{self.url}/can_i_play?bot_id={self.bot_id}", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data['allowed'], data.get('reason', '')
+        return False, "Connection error"
+
+    def get_status(self):
+        if self.bot_id is None:
+            self.register()
+        resp = self.session.get(f"{self.url}/status?bot_id={self.bot_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"should_wait": True}
+
+    def send_game_complete(self, trajectory, metadata):
+        if self.bot_id is None:
+            self.register()
+        payload = {
+            "bot_id": self.bot_id,
+            "timestamp": str(datetime.now()),
+            "game_metadata": metadata,
+            "trajectory": trajectory,
+            "total_reward": sum(s['reward'] for s in trajectory),
+            "total_steps": len(trajectory)
+        }
+        try:
+            resp = self.session.post(f"{self.url}/game_complete", json=payload, timeout=30)
+            if resp.status_code == 200:
+                logging.info("Game data sent")
+                return resp.json()
+        except requests.RequestException as e:
+            logging.error(f"Send failed: {e}")
+        return None
+
+    def download_model(self, save_path):
+        if self.bot_id is None:
+            self.register()
+        resp = self.session.get(f"{self.url}/download_model", timeout=60)
+        if resp.status_code == 200:
+            with open(save_path, 'wb') as f:
+                f.write(resp.content)
+            logging.info("Model downloaded")
+            return True
+        logging.warning("Model download failed")
+        return False
+
+# Edge: Retry 3x exponential backoff (1s, 2s, 4s). If server down >60s, use last model, log offline mode.
+# Dynamic ID: Server assigns, bot uses it.
+vision_agent.py:
+pythonimport torch
+import random
+import logging
+from image_utils import decompress_image
+
+class VisionAgent:
+    def __init__(self, model_path, action_size=2305):
+        self.model_path = model_path
+        self.action_size = action_size
+        self.model = None
+        self.load_model()
+
+    def load_model(self):
+        try:
+            self.model = torch.load(self.model_path)  # PPO policy
+            self.model.eval()
+            logging.info("Model loaded")
+        except FileNotFoundError:
+            logging.warning("No model - using random actions")
+            self.model = None
+
+    def predict(self, compressed_image):
+        if self.model is None:
+            # Random for initial
+            return random.randint(0, self.action_size - 1)
+        img = decompress_image(compressed_image)
+        img_tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0) / 255.0  # [1,1,H,W]
+        with torch.no_grad():
+            action, _ = self.model.predict(img_tensor, deterministic=False)  # PPO predict
+        return int(action)
+
+    def encode_action(self, slot, x, y):
+        if slot is None:
+            return 2304  # Wait
+        pos_id = y * 24 + x
+        return slot * 576 + pos_id
+
+    def decode_action(self, action_id):
+        if action_id == 2304:
+            return None, None, None
+        slot = action_id // 576
+        pos_id = action_id % 576
+        x = pos_id % 24
+        y = pos_id // 24
+        return slot, x, y
+
+# Edge: Invalid action (e.g., low elixir? Log, but play anyway - AI learns). Reload model after download.
+main.py:
+pythonimport time
+import threading
+import logging
+from json import load as json_load
+from vision_agent import VisionAgent
+from game_interface import GameInterface
+from server_client import ServerClient
+from card_tracker import CardTracker
+from image_utils import compress_screenshot
+
+logging.basicConfig(level=logging.INFO)
+
+def heartbeat_thread(client, interface):
+    while True:
+        status = "playing" if interface.is_game_active() else "waiting"
+        progress = interface.get_game_time() / 180.0  # Normalize to 1
+        client.send_heartbeat(status, progress)
+        time.sleep(10)
+
+def play_one_game(client, agent, interface, tracker, config):
+    trajectory = []
+    last_frame = 0
+    metadata = {"duration_seconds": 0, "outcome": "draw", "final_crowns": {"mine": 0, "enemy": 0}}
+    interface.prev_tower_hp = {'my_total': 6400, 'enemy_total': 6400, 'my_towers_down': 0, 'enemy_towers_down': 0}  # Reset
+
+    while interface.is_game_active():
+        current_time = interface.get_game_time()
+        metadata["duration_seconds"] = current_time
+
+        if current_time - last_frame >= config['frame_interval_seconds']:
+            screenshot = interface.capture_screenshot()
+            compressed = compress_screenshot(screenshot)
+            action_id = agent.predict(compressed)
+            slot, x, y = agent.decode_action(action_id)
+            card_name = tracker.card_played(slot)
+            interface.play_card(slot, x, y)
+            reward = interface.calculate_reward()
+            action_details = {"type": "play_card" if slot else "wait", "slot": slot, "card": card_name, "position": {"x": x, "y": y} if slot else None}
+            trajectory.append({
+                "step": len(trajectory),
+                "time": current_time,
+                "image": compressed['data'],
+                "image_shape": compressed['shape'],
+                "action": action_id,
+                "action_details": action_details,
+                "reward": reward
+            })
+            last_frame = current_time
+
+    # End game
+    outcome = interface.get_game_outcome()
+    final_reward = 100 if outcome == "win" else (-100 if outcome == "loss" else 0)
+    if len(trajectory) > 0:
+        trajectory[-1]['reward'] += final_reward  # Add to last step
+    metadata["outcome"] = outcome
+    client.send_game_complete(trajectory, metadata)
+    logging.info(f"Game complete: {outcome}, steps: {len(trajectory)}")
+    return trajectory
+
+if __name__ == '__main__':
+    config = json_load(open('config.json'))
+    client = ServerClient(config['server_url'])
+    agent = VisionAgent(config['model_path'])
+    interface = GameInterface()
+    tracker = CardTracker(config['deck'])
+
+    # Start heartbeat thread
+    heartbeat_t = threading.Thread(target=heartbeat_thread, args=(client, interface), daemon=True)
+    heartbeat_t.start()
+
+    while True:
+        allowed, reason = client.can_i_play()
+        if allowed:
+            logging.info(f"Playing game: {reason}")
+            play_one_game(client, agent, interface, tracker, config)
+        else:
+            status = client.get_status()
+            if status['update_available']:
+                if client.download_model(config['model_path']):
+                    agent.load_model()
+                    logging.info("Updated to new model")
+            logging.info(f"Waiting: {reason}")
+            time.sleep(5)  # Poll interval
+
+# Edge: Mid-game pause - Check is_game_active() before frame; if pause signal from status, finish if progress>0.5 else abort (rare). Crash: Thread safe, restart script reloads last model.
+start_bot.bat:
+batch@echo off
+cd /d "%~dp0"
+call activate venv
+python main.py
+pause
+EDGE CASES FOR BOT (ALL HANDLED):
+
+Server down: Use last model, offline mode (random if no model), retry connect every 30s.
+Invalid action: Play anyway (AI learns).
+Emulator crash: Interface retry 3x, send 'crashed' heartbeat, restart script.
+Add/remove: Bot self-registers, server compensates load.
+Storage: Temp trajectory in memory, delete post-send. No persistent logs beyond console.
+
+PHASE 4: KAGGLE TRAINING IMPLEMENTATION (EXACT PSEUDOCODE)
+Libraries/Tactics: Stable-Baselines3 PPO. Torch for CNN. Numpy for data. Kaggle API (kaggle lib) for upload/download (TODO in notebook). Train incremental: Load old model, learn on batch, save new.
+data_loader.py:
+pythonimport json
+import numpy as np
+import torch
+from image_utils import decompress_image  # Shared, copy to folder
+
+def load_batch(batch_file):
+    with open(batch_file, 'r') as f:
+        batch = json.load(f)  # List of 16 games
+    trajectories = []
+    for game in batch:
+        traj = game['trajectory']
+        obs = []
+        actions = []
+        rewards = []
+        dones = []
+        for step in traj:
+            obs.append(decompress_image({"data": step['image'], "shape": step['image_shape']}))
+            actions.append(step['action'])
+            rewards.append(step['reward'])
+            dones.append(step.get('done', False))
+        trajectories.append((np.array(obs), np.array(actions), np.array(rewards), np.array(dones)))
+    return trajectories  # For PPO replay
+
+def preprocess_images(images):
+    # [N, H, W] -> [N, 1, H, W] normalized
+    tensor = torch.from_numpy(images).float().unsqueeze(1) / 255.0
+    return tensor
+model.py:
+pythonimport torch.nn as nn
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+class ClashCNN(BaseFeaturesExtractor):
+    def __init__(self, observation_space, features_dim=512):
+        super().__init__(observation_space, features_dim)
+        # Exact CNN for grayscale [1,224,128]
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=8, stride=4),  # Out: [32, 55, 31]
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),  # [64, 26, 14]
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),  # [64, 24, 12]
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 24 * 12, features_dim),  # Calc: 64*24*12=18432 -> 512
+            nn.ReLU()
+        )
+
+    def forward(self, observations):
+        return self.cnn(observations)
+train_ppo.py:
+pythonimport torch
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from data_loader import load_batch, preprocess_images
+from model import ClashCNN
+import logging
+
+def train_on_batch(batch_file, model_path='current_model.pth', output_path='new_model.pth'):
+    trajectories = load_batch(batch_file)
+    # Fake env for PPO (image obs, discrete action)
+    def make_env():
+        from gymnasium import spaces
+        return make_vec_env(lambda: DummyEnv(spaces.Box(0, 255, (1,224,128), np.uint8), spaces.Discrete(2305)), n_envs=1)
+
+    # Custom policy with CNN
+    policy_kwargs = {"features_extractor_class": ClashCNN, "features_extractor_kwargs": {"features_dim": 512}}
+    model = PPO("CnnPolicy", make_env(), policy_kwargs=policy_kwargs, learning_rate=3e-4, n_steps=2048, batch_size=64, n_epochs=10, verbose=1)
+    
+    # Load old if exists
+    if os.path.exists(model_path):
+        model = PPO.load(model_path, env=make_env())
+        logging.info("Loaded old model for incremental train")
+
+    # Train on batch (offline replay)
+    for traj in trajectories:
+        obs, acts, rews, dones = traj
+        obs = preprocess_images(obs)
+        # PPO collect rollouts (adapt for offline: use replay buffer or custom learn)
+        model.learn(total_timesteps=len(obs), reset_num_timesteps=False)  # Incremental
+        # Custom: model.policy.predict(obs, actions=acts) for loss, but use SB3 learn for simplicity
+
+    model.save(output_path)
+    logging.info(f"Trained and saved: {output_path}")
+    return output_path
+
+class DummyEnv:  # Placeholder for SB3
+    def __init__(self, obs_space, act_space):
+        self.observation_space = obs_space
+        self.action_space = act_space
+        self.reset()
+
+    def reset(self):
+        return np.zeros((1,224,128), dtype=np.uint8), {}
+
+    def step(self, action):
+        return np.zeros((1,224,128), dtype=np.uint8), 0, False, False, {}
+
+# Edge: Small batch - Pad with old data if <64. Torch CUDA if available (Kaggle T4). Save only best (no multiples).
+start_kaggle.bat (Local test; for Kaggle: Upload train_ppo.py etc. as notebook):
+batch@echo off
+cd /d "%~dp0"
+call activate venv
+python train_ppo.py --batch mock_batch.json
+pause
+PHASE 5 NOTES:
+
+Burner Accounts: Create via Supercell ID (email/phone), link to emulator. Notes in README: "Use training camp, low ladder to avoid reports."
+VM Start Script (Optional start_all_vms.bat on host):
+
+batchpowershell -Command "Start-VM -Name 'ClashBot1'; Start-VM -Name 'ClashBot2'; ... Start-VM -Name 'ClashBot8'"
+
+README.md: Full setup guide, troubleshooting (e.g., "Firewall: netsh advfirewall firewall add rule name='ClashServer' dir=in action=allow protocol=TCP localport=5000").
+
+TEST SCRIPTS (IN ROOT):
+test_server.py: Mock requests, verify batch triggers.
+test_bot.py: Standalone game sim (fake screenshots), verify trajectory.
+test_full.py: Subprocess server + bot, end-to-end.
+Implement sequentially. Output all files with code. If error, log and continue. Done? Say "Phase X complete."
+
+i want you to keep testing and looping until everything works. send it to github 
+(echo "# CRAIzy" >> README.md
+git init
+git add README.md
+git commit -m "first commit"
+git branch -M main
+git remote add origin https://github.com/idkwhatitshouldbeman/CRAIzy.git
+git push -u origin main)
+keep looping till it works 

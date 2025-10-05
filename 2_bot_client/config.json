@@ -1,0 +1,14 @@
+{
+  "bot_id": null,
+  "server_url": "http://192.168.86.21:5000",
+  "deck": ["knight", "valkyrie", "minions", "arrows", "fireball", "giant", "pekka", "dark_prince"],
+  "frame_interval_seconds": 3,
+  "heartbeat_interval": 10,
+  "model_path": "./models/current_model.pth",
+  "action_space_size": 2305,
+  "grid_size": {"x": 24, "y": 24},
+  "image_size": {"height": 224, "width": 128},
+  "emulator_resolution": {"width": 720, "height": 1280},
+  "random_delay_min": 0.5,
+  "random_delay_max": 2.0
+}
